@@ -93,6 +93,18 @@ def ask_gemini(prompt: str) -> str:
         
         return "⚠️ Ошибка связи с Gemini. Попробуй ещё раз."
 
+async def transcribe_voice(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        audio_data = f.read()
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[
+            {"text": "Транскрибируй это аудио на русском языке. Только текст, без комментариев."},
+            {"inline_data": {"mime_type": "audio/ogg", "data": __import__('base64').b64encode(audio_data).decode()}}
+        ]
+    )
+    return response.text.strip()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💡 Идея поста", callback_data="idea")],
@@ -209,12 +221,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_for"] = None
         await update.message.reply_text(f"✅ Задача добавлена: {update.message.text}")
 
+async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+    file_path = f"/tmp/voice_{voice.file_id}.ogg"
+    await file.download_to_drive(file_path)
+    text = await transcribe_voice(file_path)
+    await update.message.reply_text(f"🎤 Ты сказал:\n_{text}_\n\nОбрабатываю...", parse_mode="Markdown")
+    fake_update = update
+    context.user_data["voice_text"] = text
+    await update.message.reply_text(ask_gemini(text))
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     print("Бот запущен!")
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
     app.run_polling()
 
 if __name__ == "__main__":
