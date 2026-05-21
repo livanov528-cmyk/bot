@@ -13,7 +13,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 # Настройки
 TELEGRAM_TOKEN = "8060821401:AAFI3blqQV_yJYktlKXnZfeFT0lsn9vHe8A"
-GEMINI_API_KEY = "AIzaSyCGeqEM92bvhmFlNChgVAoCWCHWKcRwVqE"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATA_FILE = "data.json"
 
 # Настройка Gemini
