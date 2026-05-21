@@ -97,7 +97,7 @@ async def transcribe_voice(file_path: str) -> str:
     with open(file_path, "rb") as f:
         audio_data = f.read()
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=[
             {"text": "Транскрибируй это аудио на русском языке. Только текст, без комментариев."},
             {"inline_data": {"mime_type": "audio/ogg", "data": __import__('base64').b64encode(audio_data).decode()}}
