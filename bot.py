@@ -234,6 +234,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_data(d)
         context.user_data["waiting_for"] = None
         await update.message.reply_text(f"✅ Задача добавлена: {update.message.text}")
+    else:
+        response = ask_gemini(update.message.text)
+        await update.message.reply_text(response)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice = update.message.voice
