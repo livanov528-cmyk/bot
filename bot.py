@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import psycopg2
 import time
 from datetime import datetime
 
@@ -45,14 +46,27 @@ RUBRICS = [
 ]
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"tasks": [], "plan": []}
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS data (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("SELECT value FROM data WHERE key = 'main'")
+        row = cur.fetchone()
+        conn.close()
+        return json.loads(row[0]) if row else {"tasks": [], "plan": [], "history": []}
+    return {"tasks": [], "plan": [], "history": []}
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS data (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("INSERT INTO data (key, value) VALUES ('main', %s) ON CONFLICT (key) DO UPDATE SET value = %s",
+                    (json.dumps(data, ensure_ascii=False), json.dumps(data, ensure_ascii=False)))
+        conn.commit()
+        conn.close()
 
 # ==================== GEMINI ФУНКЦИЯ ====================
 @retry(
