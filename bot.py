@@ -50,12 +50,67 @@ def load_data():
     if db_url:
         conn = psycopg2.connect(db_url)
         cur = conn.cursor()
+        # Это старая таблица для контент-плана и задач (оставляем)
         cur.execute("CREATE TABLE IF NOT EXISTS data (key TEXT PRIMARY KEY, value TEXT)")
+        
+        # А ЭТО НАША НОВАЯ ТАБЛИЦА ДЛЯ ИСТОРИИ ДИАЛОГОВ (Лев начнет запоминать)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                role TEXT,
+                text TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         cur.execute("SELECT value FROM data WHERE key = 'main'")
         row = cur.fetchone()
         conn.close()
-        return json.loads(row[0]) if row else {"tasks": [], "plan": [], "history": []}
-    return {"tasks": [], "plan": [], "history": []}
+        return json.loads(row[0]) if row else {"tasks": [], "plan": []}
+    return {"tasks": [], "plan": []}
+
+# НОВАЯ ФУНКЦИЯ: записывает каждую реплику в базу данных
+def save_chat_message(user_id: int, role: str, text: str):
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        try:
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO chat_history (user_id, role, text) VALUES (%s, %s, %s)",
+                (user_id, role, text)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка сохранения истории в БД: {e}")
+
+# НОВАЯ ФУНКЦИЯ: достает последние 20 сообщений из базы, когда ты пишешь боту
+def get_chat_history(user_id: int, limit: int = 20):
+    db_url = os.environ.get("DATABASE_URL")
+    history = []
+    if db_url:
+        try:
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            # Берем последние 20 строк, но разворачиваем их во времени от старых к новым
+            cur.execute("""
+                SELECT role, text FROM (
+                    SELECT role, text, timestamp FROM chat_history 
+                    WHERE user_id = %s 
+                    ORDER BY timestamp DESC LIMIT %s
+                ) sub ORDER BY timestamp ASC
+            """, (user_id, limit))
+            rows = cur.fetchall()
+            conn.close()
+            
+            for row in rows:
+                # Упаковываем в формат, который понимает Gemini
+                history.append({"role": row[0], "parts": [{"text": row[1]}]})
+        except Exception as e:
+            logging.error(f"Ошибка загрузки истории из БД: {e}")
+    return history
+
 
 def save_data(data):
     db_url = os.environ.get("DATABASE_URL")
@@ -70,42 +125,55 @@ def save_data(data):
 
 # ==================== GEMINI ФУНКЦИЯ ====================
 @retry(
-    stop=stop_after_attempt(5),           # пытается 5 раз
+    stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=2, max=12),
     retry=retry_if_exception_type(ClientError),
     reraise=True
 )
-
-def ask_gemini(prompt: str) -> str:
+def ask_gemini_with_memory(user_id: int, current_prompt: str) -> str:
     try:
+        # [ШАГ 1: ЗАГРУЗКА ИСТОРИИ ИЗ БАЗЫ]
+        history = get_chat_history(user_id, limit=20)
+        
+        # [ШАГ 2: СБОРКА ПАКЕТА ДЛЯ GEMINI]
+        formatted_contents = []
+        for msg in history:
+            formatted_contents.append(msg)
+            
+        formatted_contents.append({"role": "user", "parts": [{"text": current_prompt}]})
+
+        # [ШАГ 3: ОТПРАВКА И ПОЛУЧЕНИЕ ОТВЕТА]
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=SYSTEM_PROMPT + "\n\n" + prompt,
+            contents=formatted_contents,
             config={
+                "system_instruction": SYSTEM_PROMPT,
                 "temperature": 0.8,
-                "max_output_tokens": 4000,     # увеличил
+                "max_output_tokens": 4000,
                 "top_p": 0.9,
                 "top_k": 40,
             }
         )
         text = response.text.strip()
         
-        # Если текст слишком длинный — обрезаем с запасом для Telegram
         if len(text) > 3500:
-            text = text[:3490] + "\n\n... (продолжение в следующем сообщении)"
+            text = text[:3490] + "\n\n... (сообщение обрезано под лимиты ТГ)"
+            
+        # [ШАГ 4: СОХРАНЕНИЕ СВЕЖЕГО ДИАЛОГА В БАЗУ]
+        save_chat_message(user_id, "user", current_prompt)
+        save_chat_message(user_id, "model", text)
         
         return text
 
     except Exception as e:
-        error_str = str(e).lower()
         logging.error(f"Gemini error: {e}")
-        
+        error_str = str(e).lower()
         if "503" in error_str or "unavailable" in error_str:
             return "Google сейчас перегружен. Попробуй через 10-20 секунд."
         elif "429" in error_str:
             return "⏳ Лимит запросов. Подожди немного."
-        
         return "⚠️ Ошибка связи с Gemini. Попробуй ещё раз."
+
 
 async def transcribe_voice(file_path: str) -> str:
     with open(file_path, "rb") as f:
@@ -228,6 +296,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Что делаем?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Узнаем ID того, кто написал боту
+    user_id = update.effective_user.id
+    
     if context.user_data.get("waiting_for") == "task":
         d = load_data()
         d["tasks"].append({"text": update.message.text, "done": False})
@@ -235,19 +306,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_for"] = None
         await update.message.reply_text(f"✅ Задача добавлена: {update.message.text}")
     else:
-        response = ask_gemini(update.message.text)
+        # Передаем user_id в Gemini, чтобы подтянулась правильная история из базы
+        response = ask_gemini_with_memory(user_id, update.message.text)
         await update.message.reply_text(response)
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     voice = update.message.voice
     file = await context.bot.get_file(voice.file_id)
     file_path = f"/tmp/voice_{voice.file_id}.ogg"
     await file.download_to_drive(file_path)
+    
+    # Расшифровываем голос в текст
     text = await transcribe_voice(file_path)
     await update.message.reply_text(f"🎤 Ты сказал:\n_{text}_\n\nОбрабатываю...", parse_mode="Markdown")
-    fake_update = update
-    context.user_data["voice_text"] = text
-    await update.message.reply_text(ask_gemini(text))
+    
+    # Голосовой текст тоже пускаем через функцию памяти
+    response = ask_gemini_with_memory(user_id, text)
+    await update.message.reply_text(response)
+
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
