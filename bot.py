@@ -68,6 +68,7 @@ def load_data():
         return json.loads(row[0]) if row else {"tasks": [], "plan": []}
     return {"tasks": [], "plan": []}
 
+
 def save_chat_message(user_id: int, role: str, text: str):
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
