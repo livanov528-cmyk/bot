@@ -116,7 +116,6 @@ def get_chat_history(user_id: int, limit: int = 20):
     return history
 
 @retry(
-@retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=2, max=12),
     retry=retry_if_exception_type(ClientError),
