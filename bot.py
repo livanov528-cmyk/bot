@@ -337,8 +337,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-        return json.loads(row[0]) if row else {"tasks": [], "plan": []}
-    return {"tasks": [], "plan": []}
 
 # НОВАЯ ФУНКЦИЯ: записывает каждую реплику в базу данных
 def save_chat_message(user_id: int, role: str, text: str):
