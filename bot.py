@@ -116,6 +116,7 @@ def get_chat_history(user_id: int, limit: int = 20):
     return history
 
 @retry(
+@retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=2, max=12),
     retry=retry_if_exception_type(ClientError),
@@ -123,27 +124,23 @@ def get_chat_history(user_id: int, limit: int = 20):
 )
 def ask_gemini_with_memory(user_id: int, current_prompt: str) -> str:
     try:
+        # 1. Загружаем историю из базы данных
         history = get_chat_history(user_id, limit=20)
         
-        contents_payload = []
+        # 2. Переводим историю в правильный формат types.Content
+        history_contents = []
         for msg in history:
-            contents_payload.append(
+            history_contents.append(
                 types.Content(
                     role=msg["role"],
                     parts=[types.Part.from_text(text=msg["text"])]
                 )
             )
             
-        contents_payload.append(
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=current_prompt)]
-            )
-        )
-
-        response = client.models.generate_content(
+        # 3. Инициализируем полноценный объект чата с предзагруженной историей
+        chat = client.chats.create(
             model="gemini-2.5-flash",
-            contents=contents_payload,
+            history=history_contents,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
                 temperature=0.8,
@@ -152,24 +149,29 @@ def ask_gemini_with_memory(user_id: int, current_prompt: str) -> str:
                 top_k=40,
             )
         )
+
+        # 4. Отправляем текущее сообщение внутри созданной сессии чата
+        response = chat.send_message(current_prompt)
         text = response.text.strip()
         
         if len(text) > 3500:
             text = text[:3490] + "\n\n... (сообщение обрезано под лимиты ТГ)"
             
+        # 5. Сохраняем свежие реплики в PostgreSQL для следующих раундов
         save_chat_message(user_id, "user", current_prompt)
         save_chat_message(user_id, "model", text)
         
         return text
 
     except Exception as e:
-        logging.error(f"Gemini error: {e}")
+        logging.error(f"Gemini error in chat session: {e}")
         error_str = str(e).lower()
         if "503" in error_str or "unavailable" in error_str:
             return "Google сейчас перегружен. Попробуй через 10-20 секунд."
         elif "429" in error_str:
             return "⏳ Лимит запросов. Подожди немного."
         return "⚠️ Ошибка связи с Gemini. Попробуй ещё раз."
+
 
 async def transcribe_voice(file_path: str) -> str:
     with open(file_path, "rb") as f:
